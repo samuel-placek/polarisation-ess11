@@ -26,15 +26,20 @@
 # Si un fichier externe ou le package manque, l'étape correspondante est sautée avec un message.
 
 # %%
+# Cellule 1 : à lancer une seule fois par service, ou dans le terminal sans le %
+%pip install eurostat
+
+# Cellule 2 : imports et chemins
 from pathlib import Path
+import os
 import re
 import warnings
 
 import numpy as np
-pip install eurostat 
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import s3fs
 
 CHEMIN_ESS = Path("data/ESS11e04_2.csv")
 DOSSIER_EXTERNES = Path("data/externes")
@@ -43,6 +48,31 @@ DOSSIER_SORTIE.mkdir(parents=True, exist_ok=True)
 
 ROUND_ESS = 11
 ANNEE_REFERENCE = 2023  # terrain ESS11 : 2023-2024
+
+# --- Copie des fichiers depuis le bucket S3 d'Onyxia vers data/ ---
+BUCKET = "gleguestensae"
+# chemin dans le bucket  ->  chemin local attendu par le script
+FICHIERS_S3 = {
+    "ESS11e04_2.csv": CHEMIN_ESS,
+    "essprt-all.csv": DOSSIER_EXTERNES / "essprt-all.csv",
+    "partyfacts-external-parties.csv": DOSSIER_EXTERNES / "partyfacts-external-parties.csv",
+    "view_party.csv": DOSSIER_EXTERNES / "view_party.csv",
+}
+
+def recuperer_donnees_s3():
+    fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": "https://" + os.environ["AWS_S3_ENDPOINT"]})
+    print("Contenu du bucket :", fs.ls(BUCKET))
+    for cle, local in FICHIERS_S3.items():
+        if local.exists():
+            continue
+        local.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fs.get(f"{BUCKET}/{cle}", str(local))
+            print(f"Téléchargé : {cle} -> {local}")
+        except FileNotFoundError:
+            print(f"Absent du bucket : {BUCKET}/{cle}")
+
+recuperer_donnees_s3()
 
 # %% [markdown]
 # ## 1. Chargement
