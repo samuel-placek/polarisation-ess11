@@ -17,7 +17,7 @@
 #
 # - `data/ESS11e04_2.csv` : le fichier intégré ESS11, édition 4.2 (portail ESS / Sikt) ;
 # - `data/externes/essprt-all.csv` : table PartyFacts des partis de l'ESS
-#   (https://partyfacts.herokuapp.com/data/essprtv/, lien de téléchargement en bas de page) ;
+#   (https://github.com/hdigital/partyfactsdata/blob/main/import/essprtv/essprt-all.csv) ;
 # - `data/externes/partyfacts-external-parties.csv` : table de liens de PartyFacts entre toutes
 #   les bases de partis (page *Download* du site PartyFacts, fichier « external parties ») ;
 # - `data/externes/view_party.csv` : table des partis de ParlGov (site ParlGov, rubrique *Data*).
@@ -27,7 +27,7 @@
 
 # %%
 # Cellule 1 : à lancer une seule fois par service, ou dans le terminal sans le %
-%pip install eurostat
+"%pip install eurostat"
 
 # Cellule 2 : imports et chemins
 from pathlib import Path
