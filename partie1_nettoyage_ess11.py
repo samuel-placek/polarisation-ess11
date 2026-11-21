@@ -35,51 +35,22 @@ Sur Onyxia (SSP Cloud), les fichiers absents de `data/` sont copiés automatique
 le bucket S3 `BUCKET`. Ailleurs, il suffit de les placer dans `data/` à la main.
 """
 
+#Importation des modules et gestions des données pour une utillisation depuis onyxia
+
+
 from pathlib import Path
-import importlib.util
 import os
 import re
 import subprocess
 import sys
 import warnings
-
-
-# =============================================================================
-# Installation automatique des packages manquants
-# =============================================================================
-
-# nom utilisé dans `import`  ->  nom du package pour pip
-PACKAGES_REQUIS = {"numpy": "numpy", "pandas": "pandas", "matplotlib": "matplotlib", "seaborn": "seaborn"}
-PACKAGES_OPTIONNELS = {"s3fs": "s3fs", "eurostat": "eurostat", "pyarrow": "pyarrow"}
-
-
-def installer_si_absent(packages: dict, obligatoire: bool):
-    """Installe avec pip (dans le Python qui exécute ce script) les packages absents."""
-    manquants = [pip for module, pip in packages.items() if importlib.util.find_spec(module) is None]
-    if not manquants:
-        return
-    print(f"Installation de : {', '.join(manquants)} ...")
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", *manquants])
-    except subprocess.CalledProcessError:
-        if obligatoire:
-            raise
-        print(f"Installation impossible de {manquants} : les étapes qui en dépendent seront sautées.")
-    importlib.invalidate_caches()
-
-
-installer_si_absent(PACKAGES_REQUIS, obligatoire=True)
-installer_si_absent(PACKAGES_OPTIONNELS, obligatoire=False)
-
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-
-# =============================================================================
-# Configuration
-# =============================================================================
+import matplotlib
+import seaborn
+import s3fs
+import eurostat
+import pyarrow
 
 # Les chemins sont pris par rapport au dossier du script : le script fonctionne quel que soit
 # le dossier depuis lequel on le lance.
@@ -87,9 +58,6 @@ RACINE = Path(__file__).resolve().parent
 CHEMIN_ESS = RACINE / "data" / "ESS11e04_2.csv"
 DOSSIER_EXTERNES = RACINE / "data" / "externes"
 DOSSIER_SORTIE = RACINE / "output"
-
-ROUND_ESS = 11
-ANNEE_REFERENCE = 2023  # terrain ESS11 : 2023-2024
 
 # Bucket S3 d'Onyxia : chemin dans le bucket -> chemin local attendu par le script
 BUCKET = "gleguestensae"
@@ -100,19 +68,8 @@ FICHIERS_S3 = {
     "view_party.csv": DOSSIER_EXTERNES / "view_party.csv",
 }
 
-
-# =============================================================================
-# 0. Récupération des fichiers depuis S3 (Onyxia)
-# =============================================================================
-
 def recuperer_donnees_s3():
-    """Copie depuis le bucket S3 vers data/ les fichiers absents en local.
-
-    Ne fait rien hors d'Onyxia (variable d'environnement AWS_S3_ENDPOINT absente)."""
-    if "AWS_S3_ENDPOINT" not in os.environ:
-        print("[S3] Pas sur Onyxia : utilisation des fichiers déjà présents dans data/.")
-        return
-    import s3fs
+    """Copie depuis le bucket S3 vers data/ les fichiers absents en local."""
 
     fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": "https://" + os.environ["AWS_S3_ENDPOINT"]})
     print("[S3] Contenu du bucket :", fs.ls(BUCKET))
@@ -127,11 +84,9 @@ def recuperer_donnees_s3():
             print(f"[S3] Absent du bucket : {BUCKET}/{cle}")
 
 
-# =============================================================================
-# 1. Chargement
-# =============================================================================
+# 1. Chargement des données
 
-def charger_ess(chemin: Path) -> pd.DataFrame:
+def charger_ess(chemin):
     """Charge le CSV ESS et met les noms de colonnes en minuscules."""
     df = pd.read_csv(chemin, low_memory=False)
     df.columns = df.columns.str.strip().str.lower()
@@ -250,13 +205,13 @@ GROUPES_THEMATIQUES = [
 
 # Variables sociodémographiques : nom ESS -> (nouveau nom, bornes valides)
 SOCIODEMO = {
-    "agea":     ("age",            15, 110),
-    "yrbrn":    ("annee_naissance", 1900, 2012),
-    "gndr":     ("genre_resp",      1, 2),     # 1 = homme, 2 = femme
-    "eisced":   ("education_isced", 1, 7),     # 0 et 55 = non classable → NaN
-    "eduyrs":   ("annees_etudes",   0, 40),
-    "hinctnta": ("revenu_decile",   1, 10),
-    "domicil":  ("lieu_vie",        1, 5),     # 1 = grande ville ... 5 = ferme isolée
+    "agea":     ("age",15, 110),
+    "yrbrn":    ("annee_naissance",1900,2012),
+    "gndr":     ("genre_resp",1,2),     # 1 = homme, 2 = femme
+    "eisced":   ("education_isced",1,7),     # 0 et 55 = non classable → NaN
+    "eduyrs":   ("annees_etudes",0,40),
+    "hinctnta": ("revenu_decile",1,10),
+    "domicil":  ("lieu_vie",1,5),     # 1 = grande ville ... 5 = ferme isolée
 }
 
 POIDS = ["anweight", "pspwght", "pweight", "dweight"]
@@ -281,7 +236,7 @@ def colonnes_presentes(df, liste):
     return presentes
 
 
-def codes_manquants_vers_nan(df: pd.DataFrame) -> pd.DataFrame:
+def codes_manquants_vers_nan(df):
     """Remplace par NaN toute valeur hors des bornes valides (VARIABLES et SOCIODEMO)."""
     df = df.copy()
     bornes = {k: (v["vmin"], v["vmax"]) for k, v in VARIABLES.items()}
@@ -298,22 +253,20 @@ def codes_manquants_vers_nan(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# =============================================================================
+
 # 4. Heatmap des valeurs manquantes par pays
-# =============================================================================
-#
 # Une case = part de répondants d'un pays sans réponse valide à une variable.
 # Une colonne entièrement foncée pour un pays signifie le plus souvent que **la question n'a
 # pas été posée** dans ce pays.
 
-def taux_manquants_par_pays(df: pd.DataFrame, variables: list) -> pd.DataFrame:
+def taux_manquants_par_pays(df,variables):
     variables = colonnes_presentes(df, variables)
     taux = df[variables].isna().groupby(df["cntry"]).mean()
     taux["MOYENNE"] = taux.mean(axis=1)
     return taux.sort_values("MOYENNE", ascending=False)
 
 
-def heatmap_manquants(taux: pd.DataFrame, chemin_png: Path | None = None):
+def heatmap_manquants(taux,chemin_png):
     fig, ax = plt.subplots(figsize=(max(12, 0.35 * taux.shape[1]), max(6, 0.35 * taux.shape[0])))
     sns.heatmap(taux, cmap="Reds", vmin=0, vmax=1, cbar_kws={"label": "Part de valeurs manquantes"},
                 linewidths=0.3, linecolor="white", ax=ax)
@@ -326,8 +279,6 @@ def heatmap_manquants(taux: pd.DataFrame, chemin_png: Path | None = None):
         print(f"Heatmap enregistrée : {chemin_png}")
     return fig
 
-
-# =============================================================================
 # Exclusion de pays / variables
 # =============================================================================
 # *À coder après avoir regardé la heatmap* (seuil de manquants, cas d'Israël, de l'Ukraine, etc.).
@@ -340,7 +291,7 @@ def heatmap_manquants(taux: pd.DataFrame, chemin_png: Path | None = None):
 # 5. Recodage, normalisation, renommage
 # =============================================================================
 
-def recoder_et_normaliser(df: pd.DataFrame) -> pd.DataFrame:
+def recoder_et_normaliser(df):
     """Crée, pour chaque variable de VARIABLES, une colonne au nom lisible, normalisée sur
     [0, 1] et dans le sens défini plus haut. `lrscale` reste sur 0-10 pour rester lisible."""
     df = df.copy()
@@ -356,7 +307,7 @@ def recoder_et_normaliser(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def nettoyer_sociodemo(df: pd.DataFrame) -> pd.DataFrame:
+def nettoyer_sociodemo(df):
     df = df.copy()
     presentes = colonnes_presentes(df, list(SOCIODEMO))
     df = df.rename(columns={k: SOCIODEMO[k][0] for k in presentes})
@@ -401,7 +352,7 @@ def moyenne_lignes(df, cols, min_part=0.5):
     return bloc.mean(axis=1).where(n_ok >= np.ceil(min_part * len(cols)))
 
 
-def creer_variables_politiques(df: pd.DataFrame) -> pd.DataFrame:
+def creer_variables_politiques(df):
     df = df.copy()
     if "lrscale" in df:
         df["lrscaleabs"] = (df["lrscale"] - 5).abs()
@@ -415,41 +366,8 @@ def creer_variables_politiques(df: pd.DataFrame) -> pd.DataFrame:
     df["politiscale"] = moyenne_lignes(df, list(composantes.columns), min_part=2 / 3)
     return df
 
-
 # =============================================================================
-# 7. Indices thématiques et alpha de Cronbach
-# =============================================================================
-#
-# Indice d'un groupe = moyenne des items normalisés (au moins la moitié des items renseignés).
-# L'alpha de Cronbach mesure la cohérence interne du groupe : au-dessus de 0,7 on considère
-# en général que les items mesurent bien une même dimension.
-
-def alpha_cronbach(items: pd.DataFrame) -> float:
-    items = items.dropna().astype(float)
-    k = items.shape[1]
-    if k < 2 or len(items) < 2:
-        return np.nan
-    var_items = items.var(axis=0, ddof=1).sum()
-    var_total = items.sum(axis=1).var(ddof=1)
-    return k / (k - 1) * (1 - var_items / var_total)
-
-
-def creer_indices_thematiques(df: pd.DataFrame):
-    df = df.copy()
-    bilan = []
-    for g in GROUPES_THEMATIQUES:
-        cols = noms_du_groupe(g, df)
-        if not cols:
-            warnings.warn(f"Groupe « {g} » : aucune variable disponible, indice non créé.")
-            continue
-        df[f"idx_{g}"] = moyenne_lignes(df, cols)
-        bilan.append({"groupe": g, "n_items": len(cols), "items": ", ".join(cols),
-                      "alpha_cronbach": round(alpha_cronbach(df[cols]), 3)})
-    return df, pd.DataFrame(bilan)
-
-
-# =============================================================================
-# 8. Enrichissement 1 : partis votés (PartyFacts + ParlGov)
+# 7. Enrichissement 1 : partis votés (PartyFacts + ParlGov)
 # =============================================================================
 #
 # Le vote est stocké dans une variable par pays (`prtvtfat` pour l'Autriche, `prtvede2` pour
@@ -466,7 +384,7 @@ def creer_indices_thematiques(df: pd.DataFrame):
 TOUR_RETENU = {"de": "2", "lt": "1"}   # DE : prtvgde2 (2e voix, liste) ; LT : prtvclt1 (1er vote, parti)
 
 
-def construire_ess_id(df: pd.DataFrame) -> pd.Series:
+def construire_ess_id(df):
     cols_vote = [c for c in df.columns if re.fullmatch(r"prtv[a-z]*[a-z]{2}\d?", c)]
     ess_id = pd.Series(pd.NA, index=df.index, dtype="string")
     cntry = df["cntry"].astype("string").str.lower()
@@ -498,7 +416,7 @@ def lire_csv_externe(nom, colonnes_requises):
     return t
 
 
-def enrichir_partis(df: pd.DataFrame) -> pd.DataFrame:
+def enrichir_partis(df):
     df = df.copy()
     df["parti_ess_id"] = construire_ess_id(df)
 
@@ -547,9 +465,8 @@ def enrichir_partis(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# =============================================================================
-# 9. Enrichissement 2 : données pays via l'API Eurostat
-# =============================================================================
+
+# 8. Enrichissement 2 : données pays via l'API Eurostat
 #
 # Indicateurs pris pour l'année du terrain (2023, ou l'année d'avant si 2023 manque) :
 # - PIB par habitant en standard de pouvoir d'achat (indice UE27 = 100) : `tec00114` ;
@@ -614,7 +531,7 @@ def enrichir_eurostat(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =============================================================================
-# 10. Pondérations
+# 9. Pondérations
 # =============================================================================
 # L'ESS recommande `anweight` pour toute analyse (elle combine poids post-stratification et
 # poids de population). À utiliser pour les moyennes et corrélations des parties 2 et 3.
@@ -625,7 +542,7 @@ def moyenne_ponderee(x: pd.Series, poids: pd.Series) -> float:
 
 
 # =============================================================================
-# 11. Dictionnaire des variables et export
+# 10. Dictionnaire des variables et export
 # =============================================================================
 
 def dictionnaire_variables(df: pd.DataFrame) -> pd.DataFrame:
@@ -662,7 +579,7 @@ def exporter(df: pd.DataFrame, nom="ess11_propre"):
 
 
 # =============================================================================
-# 12. Programme principal
+# 11. Programme principal
 # =============================================================================
 
 def selection_colonnes_finales(df: pd.DataFrame) -> list:
