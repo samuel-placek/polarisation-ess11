@@ -1,57 +1,98 @@
-# %% [markdown]
-# # Partie 1 – Récupération, nettoyage et enrichissement des données ESS11
-#
-# Ce script part du fichier brut ESS11 (CSV téléchargé sur le portail ESS) et produit :
-#
-# 1. une **heatmap des valeurs manquantes** par pays et par variable ;
-# 2. un **nettoyage rigoureux** : codes de non-réponse → NaN, recodage dans un sens commun,
-#    normalisation sur [0, 1], renommage lisible, conversion des types ;
-# 3. les variables politiques `lrscale`, `lrscaleabs` et `politiscale` ;
-# 4. les **indices thématiques** (immigration, lgbt_moeurs, ...) avec leur alpha de Cronbach ;
-# 5. un **enrichissement** : partis votés (PartyFacts + ParlGov) et données pays (API Eurostat) ;
-# 6. un fichier propre (`ess11_propre.parquet` ou `.csv`) et un dictionnaire des variables.
-#
-# Le fichier se lit comme un notebook dans VS Code ou Jupyter (cellules `# %%`).
-#
-# **Fichiers à télécharger avant de lancer le script** :
-#
-# - `data/ESS11e04_2.csv` : le fichier intégré ESS11, édition 4.2 (portail ESS / Sikt) ;
-# - `data/externes/essprt-all.csv` : table PartyFacts des partis de l'ESS
-#   (https://github.com/hdigital/partyfactsdata/blob/main/import/essprtv/essprt-all.csv) ;
-# - `data/externes/partyfacts-external-parties.csv` : table de liens de PartyFacts entre toutes
-#   les bases de partis (page *Download* du site PartyFacts, fichier « external parties ») ;
-# - `data/externes/view_party.csv` : table des partis de ParlGov (site ParlGov, rubrique *Data*).
-#
-# Le package `eurostat` doit être installé : `pip install eurostat`.
-# Si un fichier externe ou le package manque, l'étape correspondante est sautée avec un message.
+"""
+Partie 1 – Récupération, nettoyage et enrichissement des données ESS11.
 
-# %%
-# Cellule 1 : à lancer une seule fois par service, ou dans le terminal sans le %
-"%pip install eurostat"
+Ce script part du fichier brut ESS11 (CSV téléchargé sur le portail ESS) et produit :
 
-# Cellule 2 : imports et chemins
+1. une heatmap des valeurs manquantes par pays et par variable ;
+2. un nettoyage rigoureux : codes de non-réponse -> NaN, recodage dans un sens commun,
+   normalisation sur [0, 1], renommage lisible, conversion des types ;
+3. les variables politiques `lrscale`, `lrscaleabs` et `politiscale` ;
+4. les indices thématiques (immigration, lgbt_moeurs, ...) avec leur alpha de Cronbach ;
+5. un enrichissement : partis votés (PartyFacts + ParlGov) et données pays (API Eurostat) ;
+6. un fichier propre (`ess11_propre.parquet` ou `.csv`) et un dictionnaire des variables.
+
+Utilisation
+-----------
+    python partie1_nettoyage_ess11.py
+
+Les packages manquants (seaborn, s3fs, eurostat, pyarrow...) sont installés automatiquement
+au lancement.
+
+Les fonctions peuvent aussi être importées depuis un autre script ou notebook :
+    from partie1_nettoyage_ess11 import charger_ess, codes_manquants_vers_nan, ...
+
+Fichiers de données (dans `data/`, à côté de ce script)
+-------------------------------------------------------
+- `data/ESS11e04_2.csv` : fichier intégré ESS11, édition 4.2 (portail ESS / Sikt) ;
+- `data/externes/essprt-all.csv` : table PartyFacts des partis de l'ESS
+  (https://github.com/hdigital/partyfactsdata/blob/main/import/essprtv/essprt-all.csv) ;
+- `data/externes/partyfacts-external-parties.csv` : table de liens de PartyFacts entre toutes
+  les bases de partis (page Download du site PartyFacts, fichier « external parties ») ;
+- `data/externes/view_party.csv` : table des partis de ParlGov
+  (https://dataverse.harvard.edu/dataset.xhtml?persistentId=doi:10.7910/DVN/2VZ5ZC).
+
+Sur Onyxia (SSP Cloud), les fichiers absents de `data/` sont copiés automatiquement depuis
+le bucket S3 `BUCKET`. Ailleurs, il suffit de les placer dans `data/` à la main.
+"""
+
 from pathlib import Path
+import importlib.util
 import os
 import re
+import subprocess
+import sys
 import warnings
+
+
+# =============================================================================
+# Installation automatique des packages manquants
+# =============================================================================
+
+# nom utilisé dans `import`  ->  nom du package pour pip
+PACKAGES_REQUIS = {"numpy": "numpy", "pandas": "pandas", "matplotlib": "matplotlib", "seaborn": "seaborn"}
+PACKAGES_OPTIONNELS = {"s3fs": "s3fs", "eurostat": "eurostat", "pyarrow": "pyarrow"}
+
+
+def installer_si_absent(packages: dict, obligatoire: bool):
+    """Installe avec pip (dans le Python qui exécute ce script) les packages absents."""
+    manquants = [pip for module, pip in packages.items() if importlib.util.find_spec(module) is None]
+    if not manquants:
+        return
+    print(f"Installation de : {', '.join(manquants)} ...")
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", *manquants])
+    except subprocess.CalledProcessError:
+        if obligatoire:
+            raise
+        print(f"Installation impossible de {manquants} : les étapes qui en dépendent seront sautées.")
+    importlib.invalidate_caches()
+
+
+installer_si_absent(PACKAGES_REQUIS, obligatoire=True)
+installer_si_absent(PACKAGES_OPTIONNELS, obligatoire=False)
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-import s3fs
 
-CHEMIN_ESS = Path("data/ESS11e04_2.csv")
-DOSSIER_EXTERNES = Path("data/externes")
-DOSSIER_SORTIE = Path("output")
-DOSSIER_SORTIE.mkdir(parents=True, exist_ok=True)
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+# Les chemins sont pris par rapport au dossier du script : le script fonctionne quel que soit
+# le dossier depuis lequel on le lance.
+RACINE = Path(__file__).resolve().parent
+CHEMIN_ESS = RACINE / "data" / "ESS11e04_2.csv"
+DOSSIER_EXTERNES = RACINE / "data" / "externes"
+DOSSIER_SORTIE = RACINE / "output"
 
 ROUND_ESS = 11
 ANNEE_REFERENCE = 2023  # terrain ESS11 : 2023-2024
 
-# --- Copie des fichiers depuis le bucket S3 d'Onyxia vers data/ ---
+# Bucket S3 d'Onyxia : chemin dans le bucket -> chemin local attendu par le script
 BUCKET = "gleguestensae"
-# chemin dans le bucket  ->  chemin local attendu par le script
 FICHIERS_S3 = {
     "ESS11e04_2.csv": CHEMIN_ESS,
     "essprt-all.csv": DOSSIER_EXTERNES / "essprt-all.csv",
@@ -59,25 +100,37 @@ FICHIERS_S3 = {
     "view_party.csv": DOSSIER_EXTERNES / "view_party.csv",
 }
 
+
+# =============================================================================
+# 0. Récupération des fichiers depuis S3 (Onyxia)
+# =============================================================================
+
 def recuperer_donnees_s3():
+    """Copie depuis le bucket S3 vers data/ les fichiers absents en local.
+
+    Ne fait rien hors d'Onyxia (variable d'environnement AWS_S3_ENDPOINT absente)."""
+    if "AWS_S3_ENDPOINT" not in os.environ:
+        print("[S3] Pas sur Onyxia : utilisation des fichiers déjà présents dans data/.")
+        return
+    import s3fs
+
     fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": "https://" + os.environ["AWS_S3_ENDPOINT"]})
-    print("Contenu du bucket :", fs.ls(BUCKET))
+    print("[S3] Contenu du bucket :", fs.ls(BUCKET))
     for cle, local in FICHIERS_S3.items():
         if local.exists():
             continue
         local.parent.mkdir(parents=True, exist_ok=True)
         try:
             fs.get(f"{BUCKET}/{cle}", str(local))
-            print(f"Téléchargé : {cle} -> {local}")
+            print(f"[S3] Téléchargé : {cle} -> {local}")
         except FileNotFoundError:
-            print(f"Absent du bucket : {BUCKET}/{cle}")
+            print(f"[S3] Absent du bucket : {BUCKET}/{cle}")
 
-recuperer_donnees_s3()
 
-# %% [markdown]
-# ## 1. Chargement
+# =============================================================================
+# 1. Chargement
+# =============================================================================
 
-# %%
 def charger_ess(chemin: Path) -> pd.DataFrame:
     """Charge le CSV ESS et met les noms de colonnes en minuscules."""
     df = pd.read_csv(chemin, low_memory=False)
@@ -87,23 +140,23 @@ def charger_ess(chemin: Path) -> pd.DataFrame:
     return df
 
 
-# %% [markdown]
-# ## 2. Dictionnaire des variables utilisées
+# =============================================================================
+# 2. Dictionnaire des variables utilisées
+# =============================================================================
 #
 # Pour chaque variable ESS :
 # - `nom` : nouveau nom lisible ;
-# - `vmin`, `vmax` : bornes **valides** de l'échelle. Tout ce qui est en dehors
+# - `vmin`, `vmax` : bornes valides de l'échelle. Tout ce qui est en dehors
 #   (7/8/9, 77/88/99, 55, 6666...) correspond à un code de non-réponse et devient NaN ;
 # - `inverser` : True si l'échelle doit être retournée pour qu'une valeur haute ait le sens
-#   indiqué dans `sens` ;
+#   indiqué en commentaire de chaque groupe ;
 # - `groupe` : groupe thématique ou bloc de variables.
 #
-# **Convention** : après recodage, une valeur haute signifie *plus ouvert / progressiste /
-# confiant / satisfait / religieux / en bonne santé*, selon le groupe (voir `sens`).
+# Convention : après recodage, une valeur haute signifie *plus ouvert / progressiste /
+# confiant / satisfait / religieux / en bonne santé*, selon le groupe (voir les commentaires).
 # Les codages ci-dessous viennent des questionnaires ESS ; vérifiez-les dans le codebook de
 # votre édition.
 
-# %%
 V = dict  # raccourci d'écriture
 
 VARIABLES = {
@@ -209,8 +262,9 @@ SOCIODEMO = {
 POIDS = ["anweight", "pspwght", "pweight", "dweight"]
 IDENTIFIANTS = ["idno", "cntry", "essround"]
 
-# %% [markdown]
-# ## 3. Codes de non-réponse → NaN
+# =============================================================================
+# 3. Codes de non-réponse → NaN
+# =============================================================================
 #
 # Les codes de non-réponse de l'ESS changent selon l'échelle (7/8/9 pour une échelle en 1-4,
 # 77/88/99 pour une échelle en 0-10, etc.). On garde donc, variable par variable, uniquement
@@ -219,7 +273,6 @@ IDENTIFIANTS = ["idno", "cntry", "essround"]
 # Pour `lrscale`, on garde aussi l'information « ne sait pas » (code 88) dans une indicatrice
 # `lrscale_nsp` : ne pas savoir se placer est en soi un signe de faible politisation.
 
-# %%
 def colonnes_presentes(df, liste):
     presentes = [c for c in liste if c in df.columns]
     absentes = [c for c in liste if c not in df.columns]
@@ -245,14 +298,14 @@ def codes_manquants_vers_nan(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# %% [markdown]
-# ## 4. Heatmap des valeurs manquantes par pays
+# =============================================================================
+# 4. Heatmap des valeurs manquantes par pays
+# =============================================================================
 #
 # Une case = part de répondants d'un pays sans réponse valide à une variable.
 # Une colonne entièrement foncée pour un pays signifie le plus souvent que **la question n'a
 # pas été posée** dans ce pays.
 
-# %%
 def taux_manquants_par_pays(df: pd.DataFrame, variables: list) -> pd.DataFrame:
     variables = colonnes_presentes(df, variables)
     taux = df[variables].isna().groupby(df["cntry"]).mean()
@@ -270,23 +323,23 @@ def heatmap_manquants(taux: pd.DataFrame, chemin_png: Path | None = None):
     plt.tight_layout()
     if chemin_png:
         fig.savefig(chemin_png, dpi=150)
-    plt.show()
+        print(f"Heatmap enregistrée : {chemin_png}")
     return fig
 
 
-# %% [markdown]
-# ### Exclusion de pays / variables
+# =============================================================================
+# Exclusion de pays / variables
+# =============================================================================
 # *À coder après avoir regardé la heatmap* (seuil de manquants, cas d'Israël, de l'Ukraine, etc.).
 
-# %%
 # def exclure(df, ...):
 #     ...
 
 
-# %% [markdown]
-# ## 5. Recodage, normalisation, renommage
+# =============================================================================
+# 5. Recodage, normalisation, renommage
+# =============================================================================
 
-# %%
 def recoder_et_normaliser(df: pd.DataFrame) -> pd.DataFrame:
     """Crée, pour chaque variable de VARIABLES, une colonne au nom lisible, normalisée sur
     [0, 1] et dans le sens défini plus haut. `lrscale` reste sur 0-10 pour rester lisible."""
@@ -323,18 +376,18 @@ def nettoyer_sociodemo(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# %% [markdown]
-# ## 6. Variables politiques : `lrscale`, `lrscaleabs`, `politiscale`
+# =============================================================================
+# 6. Variables politiques : `lrscale`, `lrscaleabs`, `politiscale`
+# =============================================================================
 #
 # - `lrscale` : auto-positionnement gauche (0) / droite (10) ;
 # - `lrscaleabs` = |lrscale − 5| : extrémité idéologique, de 0 (centre) à 5 (extrême) ;
 # - `politiscale` : indice de politisation sur [0, 1], moyenne de trois composantes :
-#   - **intérêt** pour la politique (`polintr`) ;
-#   - **participation** : part des 8 actions politiques réalisées dans les 12 derniers mois ;
-#   - **lien partisan** : a voté aux dernières élections, se sent proche d'un parti.
+#   - intérêt pour la politique (`polintr`) ;
+#   - participation : part des 8 actions politiques réalisées dans les 12 derniers mois ;
+#   - lien partisan : a voté aux dernières élections, se sent proche d'un parti.
 #   L'indice est calculé si au moins 2 des 3 composantes sont disponibles.
 
-# %%
 def noms_du_groupe(groupe, df):
     return [p["nom"] for k, p in VARIABLES.items() if p["groupe"] == groupe and p["nom"] in df.columns]
 
@@ -363,14 +416,14 @@ def creer_variables_politiques(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# %% [markdown]
-# ## 7. Indices thématiques et alpha de Cronbach
+# =============================================================================
+# 7. Indices thématiques et alpha de Cronbach
+# =============================================================================
 #
 # Indice d'un groupe = moyenne des items normalisés (au moins la moitié des items renseignés).
 # L'alpha de Cronbach mesure la cohérence interne du groupe : au-dessus de 0,7 on considère
 # en général que les items mesurent bien une même dimension.
 
-# %%
 def alpha_cronbach(items: pd.DataFrame) -> float:
     items = items.dropna().astype(float)
     k = items.shape[1]
@@ -395,8 +448,9 @@ def creer_indices_thematiques(df: pd.DataFrame):
     return df, pd.DataFrame(bilan)
 
 
-# %% [markdown]
-# ## 8. Enrichissement 1 : partis votés (PartyFacts + ParlGov)
+# =============================================================================
+# 8. Enrichissement 1 : partis votés (PartyFacts + ParlGov)
+# =============================================================================
 #
 # Le vote est stocké dans une variable par pays (`prtvtfat` pour l'Autriche, `prtvede2` pour
 # l'Allemagne, etc.), avec des codes propres à chaque pays. PartyFacts identifie chaque parti
@@ -408,7 +462,6 @@ def creer_indices_thematiques(df: pd.DataFrame):
 # gauche/droite du parti selon les experts (0-10), avec les axes État/marché,
 # liberté/autorité et UE.
 
-# %%
 # Pour les pays avec plusieurs variables de vote, la variable à retenir (À VÉRIFIER dans le codebook)
 TOUR_RETENU = {"de": "2", "lt": "1"}   # DE : prtvgde2 (2e voix, liste) ; LT : prtvclt1 (1er vote, parti)
 
@@ -494,8 +547,9 @@ def enrichir_partis(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# %% [markdown]
-# ## 9. Enrichissement 2 : données pays via l'API Eurostat
+# =============================================================================
+# 9. Enrichissement 2 : données pays via l'API Eurostat
+# =============================================================================
 #
 # Indicateurs pris pour l'année du terrain (2023, ou l'année d'avant si 2023 manque) :
 # - PIB par habitant en standard de pouvoir d'achat (indice UE27 = 100) : `tec00114` ;
@@ -507,7 +561,6 @@ def enrichir_partis(df: pd.DataFrame) -> pd.DataFrame:
 # Eurostat ne couvre pas Israël, couvre peu ou pas le Royaume-Uni depuis 2020, et seulement
 # en partie les pays candidats : leurs valeurs resteront NaN.
 
-# %%
 INDICATEURS_EUROSTAT = {
     "pib_hab_spa":   dict(code="tec00114", filtres={}),
     "gini":          dict(code="ilc_di12", filtres={}),
@@ -560,21 +613,21 @@ def enrichir_eurostat(df: pd.DataFrame) -> pd.DataFrame:
     return df.merge(pays, on="cntry", how="left").astype({"cntry": "category"})
 
 
-# %% [markdown]
-# ## 10. Pondérations
+# =============================================================================
+# 10. Pondérations
+# =============================================================================
 # L'ESS recommande `anweight` pour toute analyse (elle combine poids post-stratification et
 # poids de population). À utiliser pour les moyennes et corrélations des parties 2 et 3.
 
-# %%
 def moyenne_ponderee(x: pd.Series, poids: pd.Series) -> float:
     ok = x.notna() & poids.notna()
     return float(np.average(x[ok].astype(float), weights=poids[ok].astype(float)))
 
 
-# %% [markdown]
-# ## 11. Dictionnaire des variables et export
+# =============================================================================
+# 11. Dictionnaire des variables et export
+# =============================================================================
 
-# %%
 def dictionnaire_variables(df: pd.DataFrame) -> pd.DataFrame:
     lignes = []
     for k, p in VARIABLES.items():
@@ -608,30 +661,12 @@ def exporter(df: pd.DataFrame, nom="ess11_propre"):
         print(f"pyarrow absent → export CSV : {DOSSIER_SORTIE / nom}.csv")
 
 
-# %% [markdown]
-# ## 12. Exécution
+# =============================================================================
+# 12. Programme principal
+# =============================================================================
 
-# %%
-if __name__ == "__main__" or "get_ipython" in globals():
-    brut = charger_ess(CHEMIN_ESS)
-    df = codes_manquants_vers_nan(brut)
-
-    taux = taux_manquants_par_pays(df, list(VARIABLES) + list(SOCIODEMO))
-    print(taux["MOYENNE"].round(3).to_string())
-    heatmap_manquants(taux, DOSSIER_SORTIE / "heatmap_manquants.png")
-
-    # df = exclure(df, ...)   # ← à ajouter après lecture de la heatmap
-
-    df = recoder_et_normaliser(df)
-    df = nettoyer_sociodemo(df)
-    df = creer_variables_politiques(df)
-    df, bilan_groupes = creer_indices_thematiques(df)
-    print(bilan_groupes.to_string(index=False))
-
-    df = enrichir_partis(df)
-    df = enrichir_eurostat(df)
-
-    colonnes_finales = (
+def selection_colonnes_finales(df: pd.DataFrame) -> list:
+    colonnes = (
         colonnes_presentes(df, IDENTIFIANTS + POIDS)
         + [c for c in df.columns if c in {s[0] for s in SOCIODEMO.values()}
            or c in {"femme", "tranche_age", "cohorte", "urbain"}]
@@ -642,10 +677,47 @@ if __name__ == "__main__" or "get_ipython" in globals():
         + [c for c in df.columns if c.startswith("parti_")]
         + [c for c in INDICATEURS_EUROSTAT if c in df.columns]
     )
-    colonnes_finales = list(dict.fromkeys(c for c in colonnes_finales if c in df.columns))
-    propre = df[colonnes_finales]
+    return list(dict.fromkeys(c for c in colonnes if c in df.columns))
 
+
+def main():
+    DOSSIER_SORTIE.mkdir(parents=True, exist_ok=True)
+    recuperer_donnees_s3()
+
+    # Chargement et codes manquants
+    brut = charger_ess(CHEMIN_ESS)
+    df = codes_manquants_vers_nan(brut)
+
+    # Heatmap des manquants
+    taux = taux_manquants_par_pays(df, list(VARIABLES) + list(SOCIODEMO))
+    print("\nTaux moyen de valeurs manquantes par pays :")
+    print(taux["MOYENNE"].round(3).to_string())
+    taux.to_csv(DOSSIER_SORTIE / "taux_manquants_par_pays.csv")
+    fig = heatmap_manquants(taux, DOSSIER_SORTIE / "heatmap_manquants.png")
+    plt.close(fig)
+
+    # df = exclure(df, ...)   # <- à ajouter après lecture de la heatmap
+
+    # Nettoyage et variables créées
+    df = recoder_et_normaliser(df)
+    df = nettoyer_sociodemo(df)
+    df = creer_variables_politiques(df)
+    df, bilan_groupes = creer_indices_thematiques(df)
+    print("\nIndices thématiques :")
+    print(bilan_groupes[["groupe", "n_items", "alpha_cronbach"]].to_string(index=False))
+
+    # Enrichissement
+    df = enrichir_partis(df)
+    df = enrichir_eurostat(df)
+
+    # Export
+    propre = df[selection_colonnes_finales(df)]
     exporter(propre)
     dictionnaire_variables(propre).to_csv(DOSSIER_SORTIE / "dictionnaire_variables.csv", index=False)
     bilan_groupes.to_csv(DOSSIER_SORTIE / "alpha_cronbach_groupes.csv", index=False)
-    print(propre.shape)
+    print(f"\nBase finale : {propre.shape[0]:,} répondants, {propre.shape[1]} variables")
+    return propre
+
+
+if __name__ == "__main__":
+    main()
