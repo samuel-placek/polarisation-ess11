@@ -1,25 +1,16 @@
 """
 Partie 1 – Récupération, nettoyage et enrichissement des données ESS11.
 
-Ce script part du fichier brut ESS11 (CSV téléchargé sur le portail ESS) et produit :
+Ce script part du fichier brut ESS11 (https://ess.sikt.no/en/datafile/242aaa39-3bbb-40f5-98bf-bfb1ce53d8ef), 
+enrichie de certaines bases de données et produit :
 
-1. une heatmap des valeurs manquantes par pays et par variable ;
-2. un nettoyage rigoureux : codes de non-réponse -> NaN, recodage dans un sens commun,
+1. une heatmap des valeurs manquantes par pays et par variable : cela permet de faire le tri des variables ou des pays à exclure
+2. on retravaille : codes de non-réponse -> NaN, recodage dans un sens commun,
    normalisation sur [0, 1], renommage lisible, conversion des types ;
-3. les variables politiques `lrscale`, `lrscaleabs` et `politiscale` ;
-4. les indices thématiques (immigration, lgbt_moeurs, ...) avec leur alpha de Cronbach ;
-5. un enrichissement : partis votés (PartyFacts + ParlGov) et données pays (API Eurostat) ;
-6. un fichier propre (`ess11_propre.parquet` ou `.csv`) et un dictionnaire des variables.
+3. on crée de nouvelles variables politiques `lrscale`, `lrscaleabs` et `politiscale` ;
+4. un enrichissement : partis votés (PartyFacts + ParlGov) et données pays (API Eurostat) ;
+5. un fichier propre (`ess11_propre.parquet` ou `.csv`) et un dictionnaire des variables.
 
-Utilisation
------------
-    python partie1_nettoyage_ess11.py
-
-Les packages manquants (seaborn, s3fs, eurostat, pyarrow...) sont installés automatiquement
-au lancement.
-
-Les fonctions peuvent aussi être importées depuis un autre script ou notebook :
-    from partie1_nettoyage_ess11 import charger_ess, codes_manquants_vers_nan, ...
 
 Fichiers de données (dans `data/`, à côté de ce script)
 -------------------------------------------------------
@@ -52,8 +43,7 @@ import s3fs
 import eurostat
 import pyarrow
 
-# Les chemins sont pris par rapport au dossier du script : le script fonctionne quel que soit
-# le dossier depuis lequel on le lance.
+
 RACINE = Path(__file__).resolve().parent
 CHEMIN_ESS = RACINE / "data" / "ESS11e04_2.csv"
 DOSSIER_EXTERNES = RACINE / "data" / "externes"
@@ -84,7 +74,7 @@ def recuperer_donnees_s3():
             print(f"[S3] Absent du bucket : {BUCKET}/{cle}")
 
 
-# 1. Chargement des données
+# Chargement des données
 
 def charger_ess(chemin):
     """Charge le CSV ESS et met les noms de colonnes en minuscules."""
@@ -94,107 +84,100 @@ def charger_ess(chemin):
     print(f"{len(df):,} répondants, {df.shape[1]} colonnes, {df['cntry'].nunique()} pays")
     return df
 
+"""
+On retravaille chaque variable ESS :
+- nom : nouveau nom lisible ;
+- vmin, vmax : bornes valides de l'échelle. Tout ce qui est en dehors
+(7/8/9, 77/88/99, 55, 6666...) correspond à un code de non-réponse et devient NaN ;
+- inverser : True si l'échelle doit être retournée pour qu'une valeur haute ait le sens
+indiqué en commentaire de chaque groupe ;
+- groupe : groupe thématique ou bloc de variables.
 
-# =============================================================================
-# 2. Dictionnaire des variables utilisées
-# =============================================================================
-#
-# Pour chaque variable ESS :
-# - `nom` : nouveau nom lisible ;
-# - `vmin`, `vmax` : bornes valides de l'échelle. Tout ce qui est en dehors
-#   (7/8/9, 77/88/99, 55, 6666...) correspond à un code de non-réponse et devient NaN ;
-# - `inverser` : True si l'échelle doit être retournée pour qu'une valeur haute ait le sens
-#   indiqué en commentaire de chaque groupe ;
-# - `groupe` : groupe thématique ou bloc de variables.
-#
-# Convention : après recodage, une valeur haute signifie *plus ouvert / progressiste /
-# confiant / satisfait / religieux / en bonne santé*, selon le groupe (voir les commentaires).
-# Les codages ci-dessous viennent des questionnaires ESS ; vérifiez-les dans le codebook de
-# votre édition.
+Après recodage, une valeur haute signifie *plus ouvert / progressiste /
+confiant / satisfait / religieux / en bonne santé*, selon le groupe."""
 
-V = dict  # raccourci d'écriture
 
 VARIABLES = {
     # --- Immigration (haut = favorable à l'immigration) ---
-    "imsmetn": V(nom="immig_meme_ethnie",  vmin=1, vmax=4,  inverser=True,  groupe="immigration"),
-    "imdfetn": V(nom="immig_autre_ethnie", vmin=1, vmax=4,  inverser=True,  groupe="immigration"),
-    "impcntr": V(nom="immig_pays_pauvres", vmin=1, vmax=4,  inverser=True,  groupe="immigration"),
-    "imbgeco": V(nom="immig_economie",     vmin=0, vmax=10, inverser=False, groupe="immigration"),
-    "imueclt": V(nom="immig_culture",      vmin=0, vmax=10, inverser=False, groupe="immigration"),
-    "imwbcnt": V(nom="immig_pays_meilleur",vmin=0, vmax=10, inverser=False, groupe="immigration"),
+    "imsmetn": dict(nom="immig_meme_ethnie",  vmin=1, vmax=4,  inverser=True,  groupe="immigration"),
+    "imdfetn": dict(nom="immig_autre_ethnie", vmin=1, vmax=4,  inverser=True,  groupe="immigration"),
+    "impcntr": dict(nom="immig_pays_pauvres", vmin=1, vmax=4,  inverser=True,  groupe="immigration"),
+    "imbgeco": dict(nom="immig_economie",     vmin=0, vmax=10, inverser=False, groupe="immigration"),
+    "imueclt": dict(nom="immig_culture",      vmin=0, vmax=10, inverser=False, groupe="immigration"),
+    "imwbcnt": dict(nom="immig_pays_meilleur",vmin=0, vmax=10, inverser=False, groupe="immigration"),
     # --- LGBT / mœurs (haut = plus libéral) ---
-    "freehms":  V(nom="lgbt_libre",          vmin=1, vmax=5, inverser=True,  groupe="lgbt_moeurs"),
-    "hmsfmlsh": V(nom="lgbt_pas_honte",      vmin=1, vmax=5, inverser=False, groupe="lgbt_moeurs"),
-    "hmsacld":  V(nom="lgbt_adoption",       vmin=1, vmax=5, inverser=True,  groupe="lgbt_moeurs"),
+    "freehms":  dict(nom="lgbt_libre",          vmin=1, vmax=5, inverser=True,  groupe="lgbt_moeurs"),
+    "hmsfmlsh": dict(nom="lgbt_pas_honte",      vmin=1, vmax=5, inverser=False, groupe="lgbt_moeurs"),
+    "hmsacld":  dict(nom="lgbt_adoption",       vmin=1, vmax=5, inverser=True,  groupe="lgbt_moeurs"),
     # --- Redistribution (haut = favorable à la redistribution) ---
-    "gincdif": V(nom="redistrib_reduire_inegalites", vmin=1, vmax=5, inverser=True, groupe="redistribution"),
+    "gincdif": dict(nom="redistrib_reduire_inegalites", vmin=1, vmax=5, inverser=True, groupe="redistribution"),
     # --- Écologie (haut = plus préoccupé / engagé) ---
     # ccnthum : 55 = « le climat ne change pas », traité comme manquant (hors bornes)
-    "ccnthum": V(nom="eco_cause_humaine",     vmin=1, vmax=5,  inverser=False, groupe="ecologie"),
-    "ccrdprs": V(nom="eco_responsabilite",    vmin=0, vmax=10, inverser=False, groupe="ecologie"),
-    "wrclmch": V(nom="eco_inquietude",        vmin=1, vmax=5,  inverser=False, groupe="ecologie"),
+    "ccnthum": dict(nom="eco_cause_humaine",     vmin=1, vmax=5,  inverser=False, groupe="ecologie"),
+    "ccrdprs": dict(nom="eco_responsabilite",    vmin=0, vmax=10, inverser=False, groupe="ecologie"),
+    "wrclmch": dict(nom="eco_inquietude",        vmin=1, vmax=5,  inverser=False, groupe="ecologie"),
     # --- Confiance institutionnelle (haut = confiance) ---
-    "trstprl": V(nom="confiance_parlement",   vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
-    "trstlgl": V(nom="confiance_justice",     vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
-    "trstplc": V(nom="confiance_police",      vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
-    "trstplt": V(nom="confiance_politiciens", vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
-    "trstprt": V(nom="confiance_partis",      vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
-    "trstep":  V(nom="confiance_parl_europeen", vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
-    "trstun":  V(nom="confiance_onu",         vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
+    "trstprl": dict(nom="confiance_parlement",   vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
+    "trstlgl": dict(nom="confiance_justice",     vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
+    "trstplc": dict(nom="confiance_police",      vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
+    "trstplt": dict(nom="confiance_politiciens", vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
+    "trstprt": dict(nom="confiance_partis",      vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
+    "trstep":  dict(nom="confiance_parl_europeen", vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
+    "trstun":  dict(nom="confiance_onu",         vmin=0, vmax=10, inverser=False, groupe="confiance_institutionnelle"),
     # --- Europe (haut = pour plus d'intégration) ---
-    "euftf": V(nom="europe_integration", vmin=0, vmax=10, inverser=False, groupe="europe"),
+    "euftf": dict(nom="europe_integration", vmin=0, vmax=10, inverser=False, groupe="europe"),
     # --- Satisfaction (haut = satisfait) ---
-    "stfeco": V(nom="satisf_economie",    vmin=0, vmax=10, inverser=False, groupe="satisfaction"),
-    "stfgov": V(nom="satisf_gouvernement",vmin=0, vmax=10, inverser=False, groupe="satisfaction"),
-    "stfdem": V(nom="satisf_democratie",  vmin=0, vmax=10, inverser=False, groupe="satisfaction"),
+    "stfeco": dict(nom="satisf_economie",    vmin=0, vmax=10, inverser=False, groupe="satisfaction"),
+    "stfgov": dict(nom="satisf_gouvernement",vmin=0, vmax=10, inverser=False, groupe="satisfaction"),
+    "stfdem": dict(nom="satisf_democratie",  vmin=0, vmax=10, inverser=False, groupe="satisfaction"),
     # --- Religiosité (haut = plus religieux) ---
-    "rlgdgr": V(nom="relig_degre",       vmin=0, vmax=10, inverser=False, groupe="religiosite"),
-    "rlgatnd":V(nom="relig_assiduite",   vmin=1, vmax=7,  inverser=True,  groupe="religiosite"),
-    "pray":   V(nom="relig_priere",      vmin=1, vmax=7,  inverser=True,  groupe="religiosite"),
+    "rlgdgr": dict(nom="relig_degre",       vmin=0, vmax=10, inverser=False, groupe="religiosite"),
+    "rlgatnd":dict(nom="relig_assiduite",   vmin=1, vmax=7,  inverser=True,  groupe="religiosite"),
+    "pray":   dict(nom="relig_priere",      vmin=1, vmax=7,  inverser=True,  groupe="religiosite"),
     # --- Santé (haut = meilleure santé physique et mentale) ---
-    "health":  V(nom="sante_auto_evaluee", vmin=1, vmax=5, inverser=True,  groupe="sante"),
-    "hlthhmp": V(nom="sante_pas_genee",    vmin=1, vmax=3, inverser=False, groupe="sante"),
+    "health":  dict(nom="sante_auto_evaluee", vmin=1, vmax=5, inverser=True,  groupe="sante"),
+    "hlthhmp": dict(nom="sante_pas_genee",    vmin=1, vmax=3, inverser=False, groupe="sante"),
     # échelle de dépression CES-D 8 (module « Social inequalities in health »), 1 = jamais ... 4 = tout le temps
-    "fltdpr":  V(nom="sante_pas_deprime",     vmin=1, vmax=4, inverser=True,  groupe="sante"),
-    "flteeff": V(nom="sante_pas_effort",      vmin=1, vmax=4, inverser=True,  groupe="sante"),
-    "slprl":   V(nom="sante_sommeil_calme",   vmin=1, vmax=4, inverser=True,  groupe="sante"),
-    "wrhpp":   V(nom="sante_heureux",         vmin=1, vmax=4, inverser=False, groupe="sante"),
-    "fltlnl":  V(nom="sante_pas_seul",        vmin=1, vmax=4, inverser=True,  groupe="sante"),
-    "enjlf":   V(nom="sante_profite_vie",     vmin=1, vmax=4, inverser=False, groupe="sante"),
-    "fltsd":   V(nom="sante_pas_triste",      vmin=1, vmax=4, inverser=True,  groupe="sante"),
-    "cldgng":  V(nom="sante_motive",          vmin=1, vmax=4, inverser=True,  groupe="sante"),
+    "fltdpr":  dict(nom="sante_pas_deprime",     vmin=1, vmax=4, inverser=True,  groupe="sante"),
+    "flteeff": dict(nom="sante_pas_effort",      vmin=1, vmax=4, inverser=True,  groupe="sante"),
+    "slprl":   dict(nom="sante_sommeil_calme",   vmin=1, vmax=4, inverser=True,  groupe="sante"),
+    "wrhpp":   dict(nom="sante_heureux",         vmin=1, vmax=4, inverser=False, groupe="sante"),
+    "fltlnl":  dict(nom="sante_pas_seul",        vmin=1, vmax=4, inverser=True,  groupe="sante"),
+    "enjlf":   dict(nom="sante_profite_vie",     vmin=1, vmax=4, inverser=False, groupe="sante"),
+    "fltsd":   dict(nom="sante_pas_triste",      vmin=1, vmax=4, inverser=True,  groupe="sante"),
+    "cldgng":  dict(nom="sante_motive",          vmin=1, vmax=4, inverser=True,  groupe="sante"),
     # --- Genre (module « Gender in contemporary Europe ») : haut = plus égalitaire ---
-    "eqwrkbg": V(nom="genre_emploi_egal_famille",  vmin=0, vmax=6, inverser=False, groupe="genre"),
-    "eqmgmbg": V(nom="genre_direction_egale",      vmin=0, vmax=6, inverser=False, groupe="genre"),
-    "eqpaybg": V(nom="genre_salaire_egal_eco",     vmin=0, vmax=6, inverser=False, groupe="genre"),
-    "eqparep": V(nom="genre_parite_parlement",     vmin=1, vmax=5, inverser=True,  groupe="genre"),
-    "eqparlv": V(nom="genre_conge_parental_egal",  vmin=1, vmax=5, inverser=True,  groupe="genre"),
-    "freinsw": V(nom="genre_licencier_insultes",   vmin=1, vmax=5, inverser=True,  groupe="genre"),
-    "fineqpy": V(nom="genre_amende_inegalite",     vmin=1, vmax=5, inverser=True,  groupe="genre"),
-    "wsekpwr": V(nom="genre_rejet_femmes_pouvoir", vmin=1, vmax=5, inverser=True,  groupe="genre"),
-    "weasoff": V(nom="genre_rejet_femmes_offensees", vmin=1, vmax=5, inverser=True, groupe="genre"),
-    "wexashr": V(nom="genre_rejet_harcelement_exagere", vmin=1, vmax=5, inverser=True, groupe="genre"),
-    "wlespdm": V(nom="genre_percoit_ecart_salaire", vmin=1, vmax=5, inverser=False, groupe="genre"),
-    "wprtbym": V(nom="genre_rejet_protection",     vmin=1, vmax=5, inverser=False, groupe="genre"),
+    "eqwrkbg": dict(nom="genre_emploi_egal_famille",  vmin=0, vmax=6, inverser=False, groupe="genre"),
+    "eqmgmbg": dict(nom="genre_direction_egale",      vmin=0, vmax=6, inverser=False, groupe="genre"),
+    "eqpaybg": dict(nom="genre_salaire_egal_eco",     vmin=0, vmax=6, inverser=False, groupe="genre"),
+    "eqparep": dict(nom="genre_parite_parlement",     vmin=1, vmax=5, inverser=True,  groupe="genre"),
+    "eqparlv": dict(nom="genre_conge_parental_egal",  vmin=1, vmax=5, inverser=True,  groupe="genre"),
+    "freinsw": dict(nom="genre_licencier_insultes",   vmin=1, vmax=5, inverser=True,  groupe="genre"),
+    "fineqpy": dict(nom="genre_amende_inegalite",     vmin=1, vmax=5, inverser=True,  groupe="genre"),
+    "wsekpwr": dict(nom="genre_rejet_femmes_pouvoir", vmin=1, vmax=5, inverser=True,  groupe="genre"),
+    "weasoff": dict(nom="genre_rejet_femmes_offensees", vmin=1, vmax=5, inverser=True, groupe="genre"),
+    "wexashr": dict(nom="genre_rejet_harcelement_exagere", vmin=1, vmax=5, inverser=True, groupe="genre"),
+    "wlespdm": dict(nom="genre_percoit_ecart_salaire", vmin=1, vmax=5, inverser=False, groupe="genre"),
+    "wprtbym": dict(nom="genre_rejet_protection",     vmin=1, vmax=5, inverser=False, groupe="genre"),
     # wbrgwrm (sexisme « bienveillant ») n'est pas corrélé au reste du groupe (r = 0,01 avec
     # l'indice) : on garde la variable mais on la sort de l'indice genre.
-    "wbrgwrm": V(nom="genre_rejet_femmes_morales", vmin=1, vmax=5, inverser=False, groupe="genre_hors_indice"),
+    "wbrgwrm": dict(nom="genre_rejet_femmes_morales", vmin=1, vmax=5, inverser=False, groupe="genre_hors_indice"),
 
     # ===== Variables politiques (hors groupes thématiques) =====
-    "lrscale": V(nom="lrscale", vmin=0, vmax=10, inverser=False, groupe="politique"),
-    "polintr": V(nom="pol_interet", vmin=1, vmax=4, inverser=True, groupe="politisation_interet"),
+    "lrscale": dict(nom="lrscale", vmin=0, vmax=10, inverser=False, groupe="politique"),
+    "polintr": dict(nom="pol_interet", vmin=1, vmax=4, inverser=True, groupe="politisation_interet"),
     # actions politiques : 1 = oui, 2 = non → après inversion et normalisation, oui = 1
-    "contplt":  V(nom="pol_contact_elu",       vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
-    "donprty":  V(nom="pol_don_parti",         vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
-    "badge":    V(nom="pol_badge",             vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
-    "sgnptit":  V(nom="pol_petition",          vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
-    "pbldmna":  V(nom="pol_manifestation",     vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
-    "bctprd":   V(nom="pol_boycott",           vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
-    "pstplonl": V(nom="pol_post_en_ligne",     vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
-    "volunfp":  V(nom="pol_benevolat",         vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "contplt":  dict(nom="pol_contact_elu",       vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "donprty":  dict(nom="pol_don_parti",         vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "badge":    dict(nom="pol_badge",             vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "sgnptit":  dict(nom="pol_petition",          vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "pbldmna":  dict(nom="pol_manifestation",     vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "bctprd":   dict(nom="pol_boycott",           vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "pstplonl": dict(nom="pol_post_en_ligne",     vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
+    "volunfp":  dict(nom="pol_benevolat",         vmin=1, vmax=2, inverser=True, groupe="politisation_participation"),
     # vote : 3 = « pas en âge / pas éligible » → hors bornes → NaN
-    "vote":     V(nom="pol_a_vote",            vmin=1, vmax=2, inverser=True, groupe="politisation_partisan"),
-    "clsprty":  V(nom="pol_proche_parti",      vmin=1, vmax=2, inverser=True, groupe="politisation_partisan"),
+    "vote":     dict(nom="pol_a_vote",            vmin=1, vmax=2, inverser=True, groupe="politisation_partisan"),
+    "clsprty":  dict(nom="pol_proche_parti",      vmin=1, vmax=2, inverser=True, groupe="politisation_partisan"),
 }
 
 GROUPES_THEMATIQUES = [
@@ -217,14 +200,13 @@ SOCIODEMO = {
 POIDS = ["anweight", "pspwght", "pweight", "dweight"]
 IDENTIFIANTS = ["idno", "cntry", "essround"]
 
-# =============================================================================
-# 3. Codes de non-réponse → NaN
-# =============================================================================
-#
+# Codes de non-réponse (NaN)
+
+
 # Les codes de non-réponse de l'ESS changent selon l'échelle (7/8/9 pour une échelle en 1-4,
 # 77/88/99 pour une échelle en 0-10, etc.). On garde donc, variable par variable, uniquement
-# les valeurs comprises dans les bornes valides.
-#
+# les valeurs comprises dans les bornes.
+
 # Pour `lrscale`, on garde aussi l'information « ne sait pas » (code 88) dans une indicatrice
 # `lrscale_nsp` : ne pas savoir se placer est en soi un signe de faible politisation.
 
@@ -254,10 +236,10 @@ def codes_manquants_vers_nan(df):
 
 
 
-# 4. Heatmap des valeurs manquantes par pays
+# 1. Heatmap des valeurs manquantes par pays
 # Une case = part de répondants d'un pays sans réponse valide à une variable.
-# Une colonne entièrement foncée pour un pays signifie le plus souvent que **la question n'a
-# pas été posée** dans ce pays.
+# Une colonne entièrement foncée pour un pays signifie le plus souvent que la question n'a
+# pas été posée dans ce pays.
 
 def taux_manquants_par_pays(df,variables):
     variables = colonnes_presentes(df, variables)
@@ -281,15 +263,16 @@ def heatmap_manquants(taux,chemin_png):
 
 # Exclusion de pays / variables
 # =============================================================================
-# *À coder après avoir regardé la heatmap* (seuil de manquants, cas d'Israël, de l'Ukraine, etc.).
+# Après analyse de la heatmap, il apparaît que tous les pays affichent pour la plupart des variables des taux de 
+#réponse satisfaisants, à l'exception de l'Ukraine.
 
 # def exclure(df, ...):
 #     ...
 
 
-# =============================================================================
-# 5. Recodage, normalisation, renommage
-# =============================================================================
+
+# 2. Recodage, normalisation, renommage
+
 
 def recoder_et_normaliser(df):
     """Crée, pour chaque variable de VARIABLES, une colonne au nom lisible, normalisée sur
@@ -327,9 +310,9 @@ def nettoyer_sociodemo(df):
     return df
 
 
-# =============================================================================
-# 6. Variables politiques : `lrscale`, `lrscaleabs`, `politiscale`
-# =============================================================================
+
+# 3. Variables politiques : `lrscale`, `lrscaleabs`, `politiscale`
+
 #
 # - `lrscale` : auto-positionnement gauche (0) / droite (10) ;
 # - `lrscaleabs` = |lrscale − 5| : extrémité idéologique, de 0 (centre) à 5 (extrême) ;
@@ -366,15 +349,14 @@ def creer_variables_politiques(df):
     df["politiscale"] = moyenne_lignes(df, list(composantes.columns), min_part=2 / 3)
     return df
 
-# =============================================================================
-# 7. Enrichissement 1 : partis votés (PartyFacts + ParlGov)
-# =============================================================================
-#
+
+# 4. Enrichissement 1 : partis votés (PartyFacts + ParlGov)
+
 # Le vote est stocké dans une variable par pays (`prtvtfat` pour l'Autriche, `prtvede2` pour
 # l'Allemagne, etc.), avec des codes propres à chaque pays. PartyFacts identifie chaque parti
 # de l'ESS par un `ess_id` de la forme `PAYS-ROUND-CODE-v`, par exemple `FR-11-3-v`.
 # En Allemagne et en Lituanie, le tour de scrutin est ajouté : `DE-11-2-v-de2`.
-#
+
 # Chaîne de jointures :
 # `ess_id` → identifiant PartyFacts → identifiant ParlGov → famille de partis et position
 # gauche/droite du parti selon les experts (0-10), avec les axes État/marché,
@@ -466,7 +448,7 @@ def enrichir_partis(df):
 
 
 
-# 8. Enrichissement 2 : données pays via l'API Eurostat
+# Enrichissement 2 : données pays via l'API Eurostat
 #
 # Indicateurs pris pour l'année du terrain (2023, ou l'année d'avant si 2023 manque) :
 # - PIB par habitant en standard de pouvoir d'achat (indice UE27 = 100) : `tec00114` ;
@@ -506,7 +488,7 @@ def indicateur_eurostat(code, filtres, annee=ANNEE_REFERENCE):
     return pd.to_numeric(serie, errors="coerce")
 
 
-def enrichir_eurostat(df: pd.DataFrame) -> pd.DataFrame:
+def enrichir_eurostat(df):
     try:
         import eurostat  # noqa: F401
     except ImportError:
@@ -530,22 +512,18 @@ def enrichir_eurostat(df: pd.DataFrame) -> pd.DataFrame:
     return df.merge(pays, on="cntry", how="left").astype({"cntry": "category"})
 
 
-# =============================================================================
-# 9. Pondérations
-# =============================================================================
-# L'ESS recommande `anweight` pour toute analyse (elle combine poids post-stratification et
-# poids de population). À utiliser pour les moyennes et corrélations des parties 2 et 3.
 
-def moyenne_ponderee(x: pd.Series, poids: pd.Series) -> float:
+# 9. Pondérations
+
+def moyenne_ponderee(x,poids):
     ok = x.notna() & poids.notna()
     return float(np.average(x[ok].astype(float), weights=poids[ok].astype(float)))
 
 
-# =============================================================================
-# 10. Dictionnaire des variables et export
-# =============================================================================
 
-def dictionnaire_variables(df: pd.DataFrame) -> pd.DataFrame:
+# 10. Dictionnaire des variables et export
+
+def dictionnaire_variables(df):
     lignes = []
     for k, p in VARIABLES.items():
         if p["nom"] in df.columns:
@@ -569,7 +547,7 @@ def dictionnaire_variables(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(lignes)
 
 
-def exporter(df: pd.DataFrame, nom="ess11_propre"):
+def exporter(df, nom="ess11_propre"):
     try:
         df.to_parquet(DOSSIER_SORTIE / f"{nom}.parquet", index=False)
         print(f"Export : {DOSSIER_SORTIE / nom}.parquet")
@@ -578,11 +556,9 @@ def exporter(df: pd.DataFrame, nom="ess11_propre"):
         print(f"pyarrow absent → export CSV : {DOSSIER_SORTIE / nom}.csv")
 
 
-# =============================================================================
 # 11. Programme principal
-# =============================================================================
 
-def selection_colonnes_finales(df: pd.DataFrame) -> list:
+def selection_colonnes_finales(df):
     colonnes = (
         colonnes_presentes(df, IDENTIFIANTS + POIDS)
         + [c for c in df.columns if c in {s[0] for s in SOCIODEMO.values()}
