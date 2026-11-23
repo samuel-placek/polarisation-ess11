@@ -9,7 +9,7 @@ enrichie de certaines bases de données et produit :
    normalisation sur [0, 1], renommage lisible, conversion des types ;
 3. on crée de nouvelles variables politiques `lrscale`, `lrscaleabs` et `politiscale` ;
 4. un enrichissement : partis votés (PartyFacts + ParlGov) et données pays (API Eurostat) ;
-5. un fichier propre (`ess11_propre.parquet` ou `.csv`) et un dictionnaire des variables.
+5. un fichier propre (`ess11_propre` ou `.csv`) et un dictionnaire des variables.
 
 
 Fichiers de données (dans `data/`, à côté de ce script)
@@ -35,13 +35,18 @@ import re
 import subprocess
 import sys
 import warnings
+
+# Installation des packages qui ne sont pas fournis par défaut sur Onyxia
+subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "eurostat", "s3fs"])
+
 import numpy as np
 import pandas as pd
 import matplotlib
-import seaborn
-import s3fs
+matplotlib.use("Agg")          # pas d'écran : les figures sont seulement enregistrées
+import matplotlib.pyplot as plt
+import seaborn as sns
 import eurostat
-import pyarrow
+import s3fs
 
 
 RACINE = Path(__file__).resolve().parent
@@ -96,6 +101,8 @@ indiqué en commentaire de chaque groupe ;
 Après recodage, une valeur haute signifie *plus ouvert / progressiste /
 confiant / satisfait / religieux / en bonne santé*, selon le groupe."""
 
+ANNEE_REFERENCE = 2023
+ROUND_ESS = 11 
 
 VARIABLES = {
     # --- Immigration (haut = favorable à l'immigration) ---
@@ -266,8 +273,16 @@ def heatmap_manquants(taux,chemin_png):
 # Après analyse de la heatmap, il apparaît que tous les pays affichent pour la plupart des variables des taux de 
 #réponse satisfaisants, à l'exception de l'Ukraine.
 
-# def exclure(df, ...):
-#     ...
+PAYS_EXCLUS = ["UA"]
+
+
+def exclure_pays(df, pays_exclus):
+    """Retire de la base les répondants des pays listés (codes ISO à 2 lettres)."""
+    n_avant = len(df)
+    df = df[~df["cntry"].isin(pays_exclus)].copy()
+    print(f"Pays exclus : {pays_exclus} -> {n_avant - len(df):,} répondants retirés, "
+          f"{len(df):,} restants")
+    return df
 
 
 
@@ -349,6 +364,15 @@ def creer_variables_politiques(df):
     df["politiscale"] = moyenne_lignes(df, list(composantes.columns), min_part=2 / 3)
     return df
 
+def creer_indices_thematiques(df):
+    df = df.copy()
+    for g in GROUPES_THEMATIQUES:
+        cols = noms_du_groupe(g, df)
+        if not cols:
+            warnings.warn(f"Groupe « {g} » : aucune variable disponible, indice non créé.")
+            continue
+        df[f"idx_{g}"] = moyenne_lignes(df, cols)
+    return df
 
 # 4. Enrichissement 1 : partis votés (PartyFacts + ParlGov)
 
@@ -513,7 +537,7 @@ def enrichir_eurostat(df):
 
 
 
-# 9. Pondérations
+# Pondérations
 
 def moyenne_ponderee(x,poids):
     ok = x.notna() & poids.notna()
@@ -521,7 +545,7 @@ def moyenne_ponderee(x,poids):
 
 
 
-# 10. Dictionnaire des variables et export
+# Dictionnaire des variables et export
 
 def dictionnaire_variables(df):
     lignes = []
@@ -548,15 +572,12 @@ def dictionnaire_variables(df):
 
 
 def exporter(df, nom="ess11_propre"):
-    try:
-        df.to_parquet(DOSSIER_SORTIE / f"{nom}.parquet", index=False)
-        print(f"Export : {DOSSIER_SORTIE / nom}.parquet")
-    except ImportError:
-        df.to_csv(DOSSIER_SORTIE / f"{nom}.csv", index=False)
-        print(f"pyarrow absent → export CSV : {DOSSIER_SORTIE / nom}.csv")
+    chemin = DOSSIER_SORTIE / f"{nom}.csv"
+    df.to_csv(chemin, index=False)
+    print(f"Export : {chemin}")
 
 
-# 11. Programme principal
+# Programme principal
 
 def selection_colonnes_finales(df):
     colonnes = (
@@ -589,15 +610,13 @@ def main():
     fig = heatmap_manquants(taux, DOSSIER_SORTIE / "heatmap_manquants.png")
     plt.close(fig)
 
-    # df = exclure(df, ...)   # <- à ajouter après lecture de la heatmap
+    df = exclure_pays(df, PAYS_EXCLUS)
 
     # Nettoyage et variables créées
     df = recoder_et_normaliser(df)
     df = nettoyer_sociodemo(df)
     df = creer_variables_politiques(df)
-    df, bilan_groupes = creer_indices_thematiques(df)
-    print("\nIndices thématiques :")
-    print(bilan_groupes[["groupe", "n_items", "alpha_cronbach"]].to_string(index=False))
+    df = creer_indices_thematiques(df)
 
     # Enrichissement
     df = enrichir_partis(df)
@@ -607,7 +626,6 @@ def main():
     propre = df[selection_colonnes_finales(df)]
     exporter(propre)
     dictionnaire_variables(propre).to_csv(DOSSIER_SORTIE / "dictionnaire_variables.csv", index=False)
-    bilan_groupes.to_csv(DOSSIER_SORTIE / "alpha_cronbach_groupes.csv", index=False)
     print(f"\nBase finale : {propre.shape[0]:,} répondants, {propre.shape[1]} variables")
     return propre
 
