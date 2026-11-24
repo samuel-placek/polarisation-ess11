@@ -45,7 +45,9 @@ GROUPES = {
     "sante_": "Health & well-being",
 }
 
-# Libellés anglais des items (une valeur haute = le libellé est vrai)
+# Libellés anglais des items (une valeur haute = le libellé est vrai).
+# Comme en partie 1, on n'utilise pas `genre_rejet_femmes_morales`, qui n'est
+# pas corrélé aux autres questions sur le genre.
 LIBELLES = {
     "immig_meme_ethnie": "Allow immigrants of same ethnicity",
     "immig_autre_ethnie": "Allow immigrants of different ethnicity",
@@ -72,7 +74,6 @@ LIBELLES = {
     "genre_rejet_harcelement_exagere": "Rejects 'women exaggerate harassment'",
     "genre_percoit_ecart_salaire": "Perceives a gender pay gap",
     "genre_rejet_protection": "Rejects 'women should be protected by men'",
-    "genre_rejet_femmes_morales": "Rejects 'women have better moral sense'",
     "europe_integration": "EU unification should go further",
     "relig_degre": "Religious (self-rated)",
     "relig_assiduite": "Attends religious services",
@@ -120,7 +121,7 @@ def groupe_de(item):
 
 
 def liste_items(df):
-    """Les 50 items thématiques, rangés dans l'ordre des groupes."""
+    """Les 49 items thématiques, rangés dans l'ordre des groupes."""
     ordre = list(GROUPES.values())
     items = [c for c in LIBELLES if c in df.columns]
     return sorted(items, key=lambda c: ordre.index(groupe_de(c)))
