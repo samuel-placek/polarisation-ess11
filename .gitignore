@@ -1,5 +1,6 @@
-# Data
-data/
+# Données : le dossier data/ existe dans le repo (data/.gitkeep) mais son contenu n'est pas versionné
+data/*
+!data/.gitkeep
 *.dta
 *.sav
 *.csv
