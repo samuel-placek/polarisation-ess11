@@ -1,8 +1,8 @@
 """
 Partie 2 - Polarisation politique et attitudes (ESS11).
 
-Fonctions utilisées par le notebook `partie2.ipynb`. On part de la base
-nettoyée par la partie 1 (`output/ess11_propre.csv`).
+Fonctions appelées dans la partie 2 du notebook `rapport.ipynb`. On part de
+la base nettoyée par la partie 1 (`data/ess11_propre.csv`).
 
 Idée générale : on calcule des corrélations pondérées entre variables,
 pays par pays, puis on fait la moyenne sur les pays (chaque pays compte autant).
@@ -16,17 +16,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from .outils import corr_ponderee, moyenne_ponderee, POIDS
+
 
 # ---------------------------------------------------------------------------
 # Paramètres
 # ---------------------------------------------------------------------------
 
-CHEMIN_BASE = Path("output") / "ess11_propre.csv"
+CHEMIN_BASE = Path("data") / "ess11_propre.csv"
 DOSSIER_FIGURES = Path("figures")
 
-PAYS_EXCLUS = ["IL"]          # Israël : on reste sur un périmètre européen
-POIDS = "anweight"            # poids d'analyse recommandé par l'ESS
-N_MIN = 100                   # nombre minimal de réponses pour calculer une corrélation
 CONTROLES = ["age", "femme", "education_isced", "urbain"]   # pour les corrélations partielles
 
 BLEU, ORANGE, GRIS = "#2a78d6", "#eb6834", "#52514e"
@@ -106,9 +105,8 @@ LIBELLES = {
 # ---------------------------------------------------------------------------
 
 def charger_base(chemin=CHEMIN_BASE):
-    """Charge la base de la partie 1 et retire les pays exclus."""
+    """Charge la base nettoyée de la partie 1 (Israël et l'Ukraine y sont déjà exclus)."""
     df = pd.read_csv(chemin, low_memory=False)
-    df = df[~df["cntry"].isin(PAYS_EXCLUS)].reset_index(drop=True)
     print(f"{len(df):,} répondants, {df['cntry'].nunique()} pays")
     return df
 
@@ -131,12 +129,6 @@ def liste_items(df):
 # 2. Statistiques descriptives
 # ---------------------------------------------------------------------------
 
-def moyenne_ponderee(x, w):
-    """Moyenne de x pondérée par w, en ignorant les valeurs manquantes."""
-    ok = x.notna()
-    return np.average(x[ok], weights=w[ok])
-
-
 def tableau_pays(df):
     """Pour chaque pays : effectif, non-réponse à l'échelle gauche-droite,
     position moyenne et extrémité moyenne (pondérées)."""
@@ -157,20 +149,8 @@ def tableau_pays(df):
 # 3. Corrélations
 # ---------------------------------------------------------------------------
 
-def corr_ponderee(x, y, w):
-    """Corrélation de Pearson entre x et y, pondérée par w.
-    On garde seulement les personnes qui ont répondu aux deux questions."""
-    ok = x.notna() & y.notna()
-    if ok.sum() < N_MIN:
-        return np.nan
-    x, y, w = x[ok], y[ok], w[ok]
-    ecart_x = x - np.average(x, weights=w)
-    ecart_y = y - np.average(y, weights=w)
-    covariance = np.average(ecart_x * ecart_y, weights=w)
-    variance_x = np.average(ecart_x ** 2, weights=w)
-    variance_y = np.average(ecart_y ** 2, weights=w)
-    return covariance / np.sqrt(variance_x * variance_y)
-
+# La corrélation pondérée `corr_ponderee` est définie dans scripts/outils.py
+# (elle sert aussi à la partie 3).
 
 def corr_par_pays(df, a, b):
     """Corrélation entre les variables a et b dans chaque pays (une valeur par pays)."""
@@ -274,7 +254,7 @@ def figure_polarisation(df, tableau):
 
     sns.despine()
     fig.tight_layout()
-    enregistrer(fig, "fig1_polarisation.png")
+    enregistrer(fig, "fig02_polarisation.png")
     return parts
 
 
@@ -298,7 +278,7 @@ def figure_dellaposta(paires):
         ax.legend(frameon=False)
     sns.despine()
     fig.tight_layout()
-    enregistrer(fig, "fig2_dellaposta.png")
+    enregistrer(fig, "fig03_dellaposta.png")
 
 
 def figure_heatmap(table_pays_lr, items):
@@ -324,7 +304,7 @@ def figure_heatmap(table_pays_lr, items):
     ax.set_title("Correlation between each item and left-right position, by country\n"
                  "(countries sorted by mean |r|, strongest on the left)", loc="left")
     fig.tight_layout()
-    enregistrer(fig, "fig3_heatmap_pays.png")
+    enregistrer(fig, "fig04_heatmap_pays.png")
 
 
 def figure_bg(table):
@@ -357,4 +337,4 @@ def figure_bg(table):
     ax.legend(frameon=False, loc="lower right")
     sns.despine(left=True)
     fig.tight_layout()
-    enregistrer(fig, "fig4_baldassarri_gelman.png")
+    enregistrer(fig, "fig05_baldassarri_gelman.png")
